@@ -119,11 +119,15 @@ class IVF {
        public:
         explicit DistanceComputer(const IVF& ivf)
             : ivf_(ivf), rotated_query_(ivf.padded_dim_) {
-            cluster_offsets_.reserve(ivf.num_cluster_);
-            size_t offset = 0;
-            for (const auto& cluster : ivf.cluster_lst_) {
-                cluster_offsets_.push_back(offset);
-                offset += cluster.num();
+            idx_to_pos_.resize(ivf.num_);
+            for (size_t cid = 0; cid < ivf.cluster_lst_.size(); ++cid) {
+                const auto& cluster = ivf.cluster_lst_[cid];
+                const PID* ids = cluster.ids();
+                for (size_t j = 0; j < cluster.num(); ++j) {
+                    PID pid = ids[j];
+                    assert(pid < idx_to_pos_.size());
+                    idx_to_pos_[pid] = {cid, j};
+                }
             }
             size_t buf_size =
                 ivf_.padded_dim_ / 8 + 3 * sizeof(float) + 64;  // +64 for safety/alignment
@@ -135,8 +139,7 @@ class IVF {
             if (q_obj_) {
                 delete q_obj_;
             }
-            quant::RabitqConfig config =
-                quant::faster_config(ivf_.padded_dim_, ivf_.ex_bits_ + 1);
+            quant::RabitqConfig config;
             q_obj_ = new SplitSingleQuery<float>(
                 rotated_query_.data(),
                 ivf_.padded_dim_,
@@ -147,10 +150,10 @@ class IVF {
         }
 
         float operator()(size_t idx) {
-            auto it =
-                std::upper_bound(cluster_offsets_.begin(), cluster_offsets_.end(), idx);
-            size_t cluster_idx = std::distance(cluster_offsets_.begin(), it) - 1;
-            size_t local_idx = idx - cluster_offsets_[cluster_idx];
+            assert(idx < idx_to_pos_.size());
+            const IdxPos& pos = idx_to_pos_[idx];
+            size_t cluster_idx = pos.cluster_idx;
+            size_t local_idx = pos.local_idx;
 
             const auto& cluster = ivf_.cluster_lst_[cluster_idx];
             size_t batch_idx = local_idx / fastscan::kBatchSize;
@@ -219,7 +222,11 @@ class IVF {
         const IVF& ivf_;
         std::vector<float> rotated_query_;
         SplitSingleQuery<float>* q_obj_ = nullptr;
-        std::vector<size_t> cluster_offsets_;
+        struct IdxPos {
+            size_t cluster_idx = 0;
+            size_t local_idx = 0;
+        };
+        std::vector<IdxPos> idx_to_pos_;
         std::vector<char> unpacked_buffer_;
 
         void unpack_bin_data(const char* batch_start, size_t offset_in_batch, char* dest) {
@@ -251,8 +258,9 @@ class IVF {
                     c1 = val1 & 0x0F;
                 }
                 // Reverse byte order within each 8-byte block for uint64_t compatibility
-                size_t target_idx = (i & ~7) + (7 - (i & 7));
-                dest_code[target_idx] = (c0 << 4) | c1;
+                // size_t target_idx = (i & ~7) + (7 - (i & 7));
+                // dest_code[target_idx] = (c0 << 4) | c1;
+                dest_code[i] = (c0 << 4) | c1;
             }
 
             const char* factors_start = batch_start + (padded_dim * 32 / 8);
