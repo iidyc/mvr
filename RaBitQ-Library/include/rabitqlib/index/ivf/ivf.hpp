@@ -250,7 +250,9 @@ class IVF {
                     c0 = val0 & 0x0F;
                     c1 = val1 & 0x0F;
                 }
-                dest_code[i] = (c0 << 4) | c1;
+                // Reverse byte order within each 8-byte block for uint64_t compatibility
+                size_t target_idx = (i & ~7) + (7 - (i & 7));
+                dest_code[target_idx] = (c0 << 4) | c1;
             }
 
             const char* factors_start = batch_start + (padded_dim * 32 / 8);
