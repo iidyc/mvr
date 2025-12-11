@@ -1,0 +1,27 @@
+[nlist=131072]
+    [nprobe=1]
+    266205513 embeddings loaded in RaBitQ index.
+    Loaded 2428854 document lengths
+    Loaded 2931 queries, each with 32 embeddings of dimension 128
+    Total documents: 2428854, total embeddings: 266205513
+    Total found documents: 28758
+    start reranking 28758 documents.
+    Recall@100: 0.96
+
+    [nprobe=2]
+    266205513 embeddings loaded in RaBitQ index.
+    Loaded 2428854 document lengths
+    Loaded 2931 queries, each with 32 embeddings of dimension 128
+    Total documents: 2428854, total embeddings: 266205513
+    Total found documents: 61539
+    start reranking 61539 documents.
+    Recall@100: 0.99
+
+    [nprobe=2, rabitq.nbit=1, qb=4]
+    266205513 embeddings loaded in RaBitQ index.
+    Loaded 2428854 document lengths
+    Loaded 2931 queries, each with 32 embeddings of dimension 128
+    Total documents: 2428854, total embeddings: 266205513
+    Total found documents: 61539
+    start reranking 61539 documents.
+    Recall@100: 0.87
