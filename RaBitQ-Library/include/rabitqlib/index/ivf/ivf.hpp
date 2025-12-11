@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <vector>
 
 #include "rabitqlib/defines.hpp"
@@ -113,6 +114,164 @@ class IVF {
     );
 
     ~IVF();
+
+    class DistanceComputer {
+       public:
+        explicit DistanceComputer(const IVF& ivf)
+            : ivf_(ivf), rotated_query_(ivf.padded_dim_) {
+            cluster_offsets_.reserve(ivf.num_cluster_);
+            size_t offset = 0;
+            for (const auto& cluster : ivf.cluster_lst_) {
+                cluster_offsets_.push_back(offset);
+                offset += cluster.num();
+            }
+            size_t buf_size =
+                ivf_.padded_dim_ / 8 + 3 * sizeof(float) + 64;  // +64 for safety/alignment
+            unpacked_buffer_ = std::vector<char>(buf_size);
+        }
+
+        void set_query(const float* query) {
+            ivf_.rotator_->rotate(query, rotated_query_.data());
+            if (q_obj_) {
+                delete q_obj_;
+            }
+            quant::RabitqConfig config =
+                quant::faster_config(ivf_.padded_dim_, ivf_.ex_bits_ + 1);
+            q_obj_ = new SplitSingleQuery<float>(
+                rotated_query_.data(),
+                ivf_.padded_dim_,
+                ivf_.ex_bits_,
+                config,
+                ivf_.metric_type_
+            );
+        }
+
+        float operator()(size_t idx) {
+            auto it =
+                std::upper_bound(cluster_offsets_.begin(), cluster_offsets_.end(), idx);
+            size_t cluster_idx = std::distance(cluster_offsets_.begin(), it) - 1;
+            size_t local_idx = idx - cluster_offsets_[cluster_idx];
+
+            const auto& cluster = ivf_.cluster_lst_[cluster_idx];
+            size_t batch_idx = local_idx / fastscan::kBatchSize;
+            size_t offset_in_batch = local_idx % fastscan::kBatchSize;
+
+            const char* batch_data =
+                cluster.batch_data() +
+                batch_idx * BatchDataMap<float>::data_bytes(ivf_.padded_dim_);
+
+            unpack_bin_data(batch_data, offset_in_batch, unpacked_buffer_.data());
+
+            const char* ex_data =
+                cluster.ex_data() +
+                local_idx * ExDataMap<float>::data_bytes(ivf_.padded_dim_, ivf_.ex_bits_);
+
+            const float* centroid = ivf_.initer_->centroid(cluster_idx);
+
+            float g_add = 0;
+            float g_error = 0;
+
+            if (ivf_.metric_type_ == rabitqlib::METRIC_L2) {
+                float dist_sq = 0;
+                for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
+                    float diff = rotated_query_[i] - centroid[i];
+                    dist_sq += diff * diff;
+                }
+                float dist = std::sqrt(dist_sq);
+                g_add = dist_sq;
+                g_error = dist;
+            } else {
+                float ip = 0;
+                float norm_sq = 0;
+                for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
+                    ip += rotated_query_[i] * centroid[i];
+                    norm_sq += centroid[i] * centroid[i];
+                }
+                float norm = std::sqrt(norm_sq);
+                g_add = -ip;
+                g_error = norm;
+            }
+
+            float est_dist, low_dist, ip_x0_qr;
+
+            split_single_fulldist(
+                unpacked_buffer_.data(),
+                ex_data,
+                ivf_.ip_func_,
+                *q_obj_,
+                ivf_.padded_dim_,
+                ivf_.ex_bits_,
+                est_dist,
+                low_dist,
+                ip_x0_qr,
+                g_add,
+                g_error
+            );
+
+            return est_dist;
+        }
+
+        ~DistanceComputer() {
+            if (q_obj_) delete q_obj_;
+        }
+
+       private:
+        const IVF& ivf_;
+        std::vector<float> rotated_query_;
+        SplitSingleQuery<float>* q_obj_ = nullptr;
+        std::vector<size_t> cluster_offsets_;
+        std::vector<char> unpacked_buffer_;
+
+        void unpack_bin_data(const char* batch_start, size_t offset_in_batch, char* dest) {
+            size_t padded_dim = ivf_.padded_dim_;
+            size_t cols = padded_dim / 8;
+            uint8_t* dest_code = reinterpret_cast<uint8_t*>(dest);
+            const uint8_t* src_code = reinterpret_cast<const uint8_t*>(batch_start);
+
+            static const int invPerm0[16] = {
+                0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15
+            };
+
+            size_t vec_idx = offset_in_batch;
+            bool is_upper = (vec_idx >= 16);
+            size_t perm_idx = is_upper ? (vec_idx - 16) : vec_idx;
+            size_t j = invPerm0[perm_idx];
+
+            for (size_t i = 0; i < cols; ++i) {
+                const uint8_t* block = src_code + i * 32;
+                uint8_t val0 = block[j];
+                uint8_t val1 = block[j + 16];
+
+                uint8_t c0, c1;
+                if (is_upper) {
+                    c0 = val0 >> 4;
+                    c1 = val1 >> 4;
+                } else {
+                    c0 = val0 & 0x0F;
+                    c1 = val1 & 0x0F;
+                }
+                dest_code[i] = (c0 << 4) | c1;
+            }
+
+            const char* factors_start = batch_start + (padded_dim * 32 / 8);
+            const float* f_add_src = reinterpret_cast<const float*>(factors_start);
+            const float* f_rescale_src = f_add_src + 32;
+            const float* f_error_src = f_rescale_src + 32;
+
+            char* dest_factors = dest + (padded_dim / 8);
+            float* f_add_dest = reinterpret_cast<float*>(dest_factors);
+            float* f_rescale_dest = f_add_dest + 1;
+            float* f_error_dest = f_rescale_dest + 1;
+
+            *f_add_dest = f_add_src[vec_idx];
+            *f_rescale_dest = f_rescale_src[vec_idx];
+            *f_error_dest = f_error_src[vec_idx];
+        }
+    };
+
+    std::unique_ptr<DistanceComputer> get_distance_computer() const {
+        return std::make_unique<DistanceComputer>(*this);
+    }
 
     void construct(const float*, const float*, const PID*, bool);
 
