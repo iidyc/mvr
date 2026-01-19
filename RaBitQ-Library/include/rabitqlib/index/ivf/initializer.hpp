@@ -168,7 +168,7 @@ class HNSWInitializer : public Initializer {
     }
 
     [[nodiscard]] const float* centroid(PID id) const override {
-        return reinterpret_cast<const float*>(alg_hnsw_->getDataByInternalId(id));
+        return reinterpret_cast<const float*>(alg_hnsw_->getDataByInternalId(alg_hnsw_->label_lookup_[id]));
     }
 
     void centroids_distances(

@@ -27,9 +27,11 @@
 
 namespace rabitqlib::ivf {
 class IVF {
-   private:
+//    private:
+public:
     Initializer* initer_ = nullptr;      // initializer for find candidate cluster
     char* batch_data_ = nullptr;         // 1-bit code and factors
+    char* compact_bin_data_ = nullptr;   // compact 1-bit code and factors
     char* ex_data_ = nullptr;            // code for remaining bits
     PID* ids_ = nullptr;                 // PID of vectors (orgnized by clusters)
     size_t num_;                         // num of data points
@@ -42,6 +44,10 @@ class IVF {
     std::vector<Cluster> cluster_lst_;   // List of clusters in ivf
     MetricType metric_type_ = rabitqlib::METRIC_L2;  // metric type
     float (*ip_func_)(const float*, const uint8_t*, size_t) = nullptr;
+
+    std::vector<float> centroid_dists_;
+
+    std::vector<std::pair<PID, size_t>> pid_to_cid_;
 
     void quantize_cluster(
         Cluster&,
@@ -71,6 +77,8 @@ class IVF {
     void allocate_memory(const std::vector<size_t>&);
 
     void init_clusters(const std::vector<size_t>&);
+
+    void build_id_map();
 
     void free_memory() {
         ::delete initer_;
@@ -102,7 +110,7 @@ class IVF {
         bool
     ) const;
 
-   public:
+//    public:
     explicit IVF() {}
     explicit IVF(
         size_t,
@@ -118,61 +126,41 @@ class IVF {
     class DistanceComputer {
        public:
         explicit DistanceComputer(const IVF& ivf)
-            : ivf_(ivf), rotated_query_(ivf.padded_dim_) {
-            idx_to_pos_.resize(ivf.num_);
-            for (size_t cid = 0; cid < ivf.cluster_lst_.size(); ++cid) {
-                const auto& cluster = ivf.cluster_lst_[cid];
-                const PID* ids = cluster.ids();
-                for (size_t j = 0; j < cluster.num(); ++j) {
-                    PID pid = ids[j];
-                    assert(pid < idx_to_pos_.size());
-                    idx_to_pos_[pid] = {cid, j};
-                }
-            }
-            size_t buf_size =
-                ivf_.padded_dim_ / 8 + 3 * sizeof(float) + 64;  // +64 for safety/alignment
-            unpacked_buffer_ = std::vector<char>(buf_size);
-        }
+            : ivf_(ivf), rotated_query_(ivf.padded_dim_) {}
 
         void set_query(const float* query) {
             ivf_.rotator_->rotate(query, rotated_query_.data());
             if (q_obj_) {
                 delete q_obj_;
             }
-            quant::RabitqConfig config;
-            q_obj_ = new SplitSingleQuery<float>(
+            q_obj_ = new SplitBatchQuery<float>(
                 rotated_query_.data(),
                 ivf_.padded_dim_,
                 ivf_.ex_bits_,
-                config,
                 ivf_.metric_type_
             );
         }
 
         float operator()(size_t idx) {
-            assert(idx < idx_to_pos_.size());
-            const IdxPos& pos = idx_to_pos_[idx];
-            size_t cluster_idx = pos.cluster_idx;
-            size_t local_idx = pos.local_idx;
+            assert(idx < ivf_.pid_to_cid_.size());
+            auto pos = ivf_.pid_to_cid_[idx];
+            size_t cluster_idx = pos.first;
+            size_t local_idx = pos.second;
 
             const auto& cluster = ivf_.cluster_lst_[cluster_idx];
+
+            assert(cluster.ids()[local_idx] == idx);
+
             size_t batch_idx = local_idx / fastscan::kBatchSize;
             size_t offset_in_batch = local_idx % fastscan::kBatchSize;
 
-            const char* batch_data =
-                cluster.batch_data() +
-                batch_idx * BatchDataMap<float>::data_bytes(ivf_.padded_dim_);
-
-            unpack_bin_data(batch_data, offset_in_batch, unpacked_buffer_.data());
+            const char* batch_data = cluster.batch_data() + batch_idx * BatchDataMap<float>::data_bytes(ivf_.padded_dim_);
 
             const char* ex_data =
                 cluster.ex_data() +
                 local_idx * ExDataMap<float>::data_bytes(ivf_.padded_dim_, ivf_.ex_bits_);
 
             const float* centroid = ivf_.initer_->centroid(cluster_idx);
-
-            float g_add = 0;
-            float g_error = 0;
 
             if (ivf_.metric_type_ == rabitqlib::METRIC_L2) {
                 float dist_sq = 0;
@@ -181,8 +169,7 @@ class IVF {
                     dist_sq += diff * diff;
                 }
                 float dist = std::sqrt(dist_sq);
-                g_add = dist_sq;
-                g_error = dist;
+                q_obj_->set_g_add(dist);
             } else {
                 float ip = 0;
                 float norm_sq = 0;
@@ -191,27 +178,35 @@ class IVF {
                     norm_sq += centroid[i] * centroid[i];
                 }
                 float norm = std::sqrt(norm_sq);
-                g_add = -ip;
-                g_error = norm;
+                q_obj_->set_g_add(norm, ip);
             }
 
-            float est_dist, low_dist, ip_x0_qr;
+            float est_dist_arr[fastscan::kBatchSize];
+            float low_dist_arr[fastscan::kBatchSize];
+            float ip_x0_qr_arr[fastscan::kBatchSize];
 
-            split_single_fulldist(
-                unpacked_buffer_.data(),
+            split_batch_estdist(
+                batch_data,
+                *q_obj_,
+                ivf_.padded_dim_,
+                est_dist_arr,
+                low_dist_arr,
+                ip_x0_qr_arr,
+                true
+            );
+
+            float ip_x0_qr = ip_x0_qr_arr[offset_in_batch];
+
+            float ex_dist = split_distance_boosting(
                 ex_data,
                 ivf_.ip_func_,
                 *q_obj_,
                 ivf_.padded_dim_,
                 ivf_.ex_bits_,
-                est_dist,
-                low_dist,
-                ip_x0_qr,
-                g_add,
-                g_error
+                ip_x0_qr
             );
 
-            return est_dist;
+            return ex_dist;
         }
 
         ~DistanceComputer() {
@@ -221,62 +216,11 @@ class IVF {
        private:
         const IVF& ivf_;
         std::vector<float> rotated_query_;
-        SplitSingleQuery<float>* q_obj_ = nullptr;
+        SplitBatchQuery<float>* q_obj_ = nullptr;
         struct IdxPos {
             size_t cluster_idx = 0;
             size_t local_idx = 0;
         };
-        std::vector<IdxPos> idx_to_pos_;
-        std::vector<char> unpacked_buffer_;
-
-        void unpack_bin_data(const char* batch_start, size_t offset_in_batch, char* dest) {
-            size_t padded_dim = ivf_.padded_dim_;
-            size_t cols = padded_dim / 8;
-            uint8_t* dest_code = reinterpret_cast<uint8_t*>(dest);
-            const uint8_t* src_code = reinterpret_cast<const uint8_t*>(batch_start);
-
-            static const int invPerm0[16] = {
-                0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15
-            };
-
-            size_t vec_idx = offset_in_batch;
-            bool is_upper = (vec_idx >= 16);
-            size_t perm_idx = is_upper ? (vec_idx - 16) : vec_idx;
-            size_t j = invPerm0[perm_idx];
-
-            for (size_t i = 0; i < cols; ++i) {
-                const uint8_t* block = src_code + i * 32;
-                uint8_t val0 = block[j];
-                uint8_t val1 = block[j + 16];
-
-                uint8_t c0, c1;
-                if (is_upper) {
-                    c0 = val0 >> 4;
-                    c1 = val1 >> 4;
-                } else {
-                    c0 = val0 & 0x0F;
-                    c1 = val1 & 0x0F;
-                }
-                // Reverse byte order within each 8-byte block for uint64_t compatibility
-                // size_t target_idx = (i & ~7) + (7 - (i & 7));
-                // dest_code[target_idx] = (c0 << 4) | c1;
-                dest_code[i] = (c0 << 4) | c1;
-            }
-
-            const char* factors_start = batch_start + (padded_dim * 32 / 8);
-            const float* f_add_src = reinterpret_cast<const float*>(factors_start);
-            const float* f_rescale_src = f_add_src + 32;
-            const float* f_error_src = f_rescale_src + 32;
-
-            char* dest_factors = dest + (padded_dim / 8);
-            float* f_add_dest = reinterpret_cast<float*>(dest_factors);
-            float* f_rescale_dest = f_add_dest + 1;
-            float* f_error_dest = f_rescale_dest + 1;
-
-            *f_add_dest = f_add_src[vec_idx];
-            *f_rescale_dest = f_rescale_src[vec_idx];
-            *f_error_dest = f_error_src[vec_idx];
-        }
     };
 
     std::unique_ptr<DistanceComputer> get_distance_computer() const {
@@ -291,7 +235,9 @@ class IVF {
 
     void search(const float*, size_t, size_t, PID*, bool) const;
 
-    void gather_dists(const float*, size_t, std::vector<float>&, std::vector<PID>&, bool) const;
+    void gather_dists(const float*, size_t, std::vector<float>&, std::vector<PID>&, int, bool);
+
+    void gather_ids(const float*, size_t, std::vector<PID>&, int, bool);
 
     [[nodiscard]] size_t padded_dim() const { return this->padded_dim_; }
 
@@ -391,6 +337,8 @@ inline void IVF::allocate_memory(const std::vector<size_t>& cluster_sizes) {
     }
     this->batch_data_ =
         memory::align_allocate<64, char, true>(batch_data_bytes(cluster_sizes));
+    this->compact_bin_data_ =
+        memory::align_allocate<64, char, true>(BinDataMap<float>::data_bytes(padded_dim_) * num_);
     if (ex_bits_ > 0) {
         this->ex_data_ = memory::align_allocate<64, char, true>(ex_data_bytes());
     }
@@ -413,16 +361,31 @@ inline void IVF::init_clusters(const std::vector<size_t>& cluster_sizes) {
 
         char* current_batch_data =
             batch_data_ + (BatchDataMap<float>::data_bytes(padded_dim_) * added_batches);
+        char* current_compact_bin_data =
+            compact_bin_data_ + (BinDataMap<float>::data_bytes(padded_dim_) * added_vectors);
         char* current_ex_data =
             ex_data_ +
             (added_vectors * ExDataMap<float>::data_bytes(padded_dim_, ex_bits_));
         PID* ids = ids_ + added_vectors;
 
-        Cluster cur_cluster(num, current_batch_data, current_ex_data, ids);
+        Cluster cur_cluster(num, current_batch_data, current_ex_data, ids, current_compact_bin_data);
         this->cluster_lst_.push_back(std::move(cur_cluster));
 
         added_vectors += num;
         added_batches += num_batches;
+    }
+}
+
+inline void IVF::build_id_map() {
+    pid_to_cid_.resize(num_);
+    for (size_t cid = 0; cid < cluster_lst_.size(); ++cid) {
+        const auto& cluster = cluster_lst_[cid];
+        const PID* ids = cluster.ids();
+        for (size_t j = 0; j < cluster.num(); ++j) {
+            PID pid = ids[j];
+            assert(pid < pid_to_cid_.size());
+            pid_to_cid_[pid] = {static_cast<PID>(cid), j};
+        }
     }
 }
 
@@ -454,9 +417,21 @@ inline void IVF::quantize_cluster(
     }
 
     char* batch_data = cp.batch_data();
+    char* compact_bin_data = cp.compact_bin_data();
     char* ex_data = cp.ex_data();
     for (size_t i = 0; i < num_points; i += fastscan::kBatchSize) {
         size_t n = std::min(fastscan::kBatchSize, num_points - i);
+
+        for (size_t j = 0; j < n; ++j) {
+            // compact bin data
+            quant::quantize_compact_one_bit(
+                rotated_data.data() + ((i + j) * padded_dim_),
+                rotated_centroid,
+                padded_dim_,
+                compact_bin_data + ((i + j) * BinDataMap<float>::data_bytes(padded_dim_)),
+                metric_type_
+            );
+        }
 
         quant::quantize_split_batch(
             rotated_data.data() + (i * padded_dim_),
@@ -516,6 +491,10 @@ inline void IVF::save(const char* filename) const {
     );
     output.write(reinterpret_cast<const char*>(ids_), static_cast<long>(ids_bytes()));
 
+    output.write(
+        reinterpret_cast<const char*>(compact_bin_data_), static_cast<long>(BinDataMap<float>::data_bytes(padded_dim_) * num_)
+    );
+
     output.close();
 }
 
@@ -561,8 +540,12 @@ inline void IVF::load(const char* filename) {
     input.read(ex_data_, static_cast<long>(ex_data_bytes()));
     input.read(reinterpret_cast<char*>(ids_), static_cast<long>(ids_bytes()));
 
+    input.read(compact_bin_data_, static_cast<long>(BinDataMap<float>::data_bytes(padded_dim_) * num_));
+
     /* Init each cluster */
     init_clusters(cluster_sizes);
+
+    build_id_map();
 
     input.close();
     std::cout << "Index loaded\n";
@@ -620,8 +603,9 @@ inline void IVF::gather_dists(
     size_t nprobe,
     std::vector<float>& dists,
     std::vector<PID>& ids,
+    int qid,
     bool use_hacc = true
-) const {
+) {
     nprobe = std::min(nprobe, num_cluster_);  // corner case
     std::vector<float> rotated_query(padded_dim_);
     this->rotator_->rotate(query, rotated_query.data());
@@ -629,6 +613,8 @@ inline void IVF::gather_dists(
     // use initer to get closest nprobe centroids
     std::vector<AnnCandidate<float>> centroid_dist(nprobe);
     this->initer_->centroids_distances(rotated_query.data(), nprobe, centroid_dist);
+
+    centroid_dists_[qid] = centroid_dist[nprobe - 1].distance;
 
     SplitBatchQuery<float> q_obj(
         rotated_query.data(), padded_dim_, ex_bits_, metric_type_, use_hacc
@@ -681,6 +667,34 @@ inline void IVF::gather_dists(
             scan_one_batch_gather(batch_data, ex_data, cur_dists, q_obj, remain, use_hacc);
             cur_dists += remain;
         }
+    }
+}
+
+
+inline void IVF::gather_ids(
+    const float* __restrict__ query,
+    size_t nprobe,
+    std::vector<PID>& ids,
+    int qid,
+    bool use_hacc = true
+) {
+    nprobe = std::min(nprobe, num_cluster_);  // corner case
+    std::vector<float> rotated_query(padded_dim_);
+    this->rotator_->rotate(query, rotated_query.data());
+
+    // use initer to get closest nprobe centroids
+    std::vector<AnnCandidate<float>> centroid_dist(nprobe);
+    this->initer_->centroids_distances(rotated_query.data(), nprobe, centroid_dist);
+
+    centroid_dists_[qid] = centroid_dist[nprobe - 1].distance;
+
+    for (size_t i = 0; i < nprobe; ++i) {
+        PID cid = centroid_dist[i].id;
+        float dist = centroid_dist[i].distance;
+        const Cluster& cur_cluster = cluster_lst_[cid];
+        ids.resize(ids.size() + cur_cluster.num());
+        PID* cur_ids = ids.data() + (ids.size() - cur_cluster.num());
+        std::copy(cur_cluster.ids(), cur_cluster.ids() + cur_cluster.num(), cur_ids);
     }
 }
 

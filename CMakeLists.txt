@@ -45,3 +45,17 @@ target_link_libraries(search_exbits
     PRIVATE
         "/work/pi_ameliou_umass_edu/yanqichen/.conda/envs/faiss/lib/libfaiss_avx2.so"
 )
+
+add_executable(rabitqex_ivf_est expr/rabitqex_ivf_est.cpp)
+
+target_link_libraries(rabitqex_ivf_est
+    PRIVATE
+        "/work/pi_ameliou_umass_edu/yanqichen/.conda/envs/faiss/lib/libfaiss_avx2.so"
+)
+
+add_executable(rabitqex_ivf_gather_est expr/rabitqex_ivf_gather_est.cpp)
+
+target_link_libraries(rabitqex_ivf_gather_est
+    PRIVATE
+        "/work/pi_ameliou_umass_edu/yanqichen/.conda/envs/faiss/lib/libfaiss_avx2.so"
+)

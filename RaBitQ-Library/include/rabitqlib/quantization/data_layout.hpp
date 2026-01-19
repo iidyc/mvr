@@ -158,7 +158,9 @@ struct BinDataMap {
     [[nodiscard]] T& f_error() { return f_error_; }
 
     static size_t data_bytes(size_t padded_dim) {
-        return (padded_dim / 8) + (sizeof(T) * 3);
+        // return (padded_dim / 8) + (sizeof(T) * 3);
+        size_t size = (padded_dim / 8) + (sizeof(T) * 3);
+        return (size + 7) & ~7;
     }
 
    private:

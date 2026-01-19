@@ -5,9 +5,9 @@
 #include <vector>
 #include <unordered_set>
 
-std::vector<std::vector<int>> read_gt_tsv(int num_queries, int top_k) {
+std::vector<std::vector<size_t>> read_gt_tsv(int num_queries, int top_k) {
     const std::string baseline_tsv_name = "../../ColBERT/lotte-groundtruth-top1000--.tsv";
-    std::vector<std::vector<int>> ground_truth(num_queries, std::vector<int>(top_k, -1));
+    std::vector<std::vector<size_t>> ground_truth(num_queries, std::vector<size_t>(top_k, -1));
     std::ifstream file(baseline_tsv_name);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << baseline_tsv_name << std::endl;
@@ -27,7 +27,7 @@ std::vector<std::vector<int>> read_gt_tsv(int num_queries, int top_k) {
             continue;
         }
         int qID = std::stoi(arr[0]);
-        int itemID = std::stoi(arr[1]);
+        size_t itemID = std::stoull(arr[1]);
         int rank = std::stoi(arr[2]);
         ground_truth[qID][rank] = itemID;
     }
@@ -35,15 +35,16 @@ std::vector<std::vector<int>> read_gt_tsv(int num_queries, int top_k) {
 }
 
 void compute_recall(
-        const std::vector<std::vector<int>>& ground_truth,
-        const std::vector<std::vector<int>>& retrieved,
-        int top_k) {
+    const std::vector<std::vector<size_t>>& ground_truth,
+    const std::vector<std::vector<size_t>>& retrieved,
+    int top_k
+) {
     int num_queries = retrieved.size();
     int total_recall = 0;
     for (int i = 0; i < num_queries; ++i) {
         const auto& gt = ground_truth[i];
         const auto& ret = retrieved[i];
-        std::unordered_set<int> gt_set(gt.begin(), gt.begin() + top_k);
+        std::unordered_set<size_t> gt_set(gt.begin(), gt.begin() + top_k);
         int correct = 0;
         for (int j = 0; j < top_k; ++j) {
             if (gt_set.find(ret[j]) != gt_set.end()) {
@@ -53,5 +54,5 @@ void compute_recall(
         total_recall += correct;
     }
     double recall = static_cast<double>(total_recall) / (num_queries * top_k);
-    std::cout << "Recall@"+ std::to_string(top_k) + ": " << recall << std::endl;
+    std::cout << "Recall@" + std::to_string(top_k) + ": " << recall << std::endl;
 }
