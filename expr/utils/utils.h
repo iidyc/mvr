@@ -196,3 +196,38 @@ void rerank_gathered_dists(
         max_heap.pop();
     }
 }
+
+void rerank_gathered_dists_impute(
+    rabitqlib::ivf::IVF& ivf,
+    int qid,
+    std::vector<float>& doc_dists,
+    int num_docs, 
+    int q_doclen, 
+    const std::vector<size_t>& candidates, 
+    int k, 
+    std::vector<size_t>& id_out
+) {
+    std::vector<float> doc_scores(num_docs, 0.0f);
+    for (int j = 0; j < q_doclen; ++j) {
+        for (size_t doc_id : candidates) {
+            if (doc_dists[j * num_docs + doc_id] != 0) {
+                doc_scores[doc_id] += doc_dists[j * num_docs + doc_id];
+            } else {
+                doc_scores[doc_id] += (2 - ivf.centroid_dists_[qid * q_doclen + j]) / 2;
+            }
+        }
+    }
+    using DocScorePair = std::pair<float, size_t>;
+    auto cmp = [](const DocScorePair& a, const DocScorePair& b) {
+        return a.first < b.first; // max-heap
+    };
+    std::priority_queue<DocScorePair, std::vector<DocScorePair>, decltype(cmp)> max_heap(cmp);
+    for (size_t doc_id : candidates) {
+        float score = doc_scores[doc_id];
+        max_heap.emplace(score, doc_id);
+    }
+    for (int i = 0; i < k && !max_heap.empty(); ++i) {
+        id_out.push_back(max_heap.top().second);
+        max_heap.pop();
+    }
+}

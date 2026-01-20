@@ -46,6 +46,7 @@ public:
     float (*ip_func_)(const float*, const uint8_t*, size_t) = nullptr;
 
     std::vector<float> centroid_dists_;
+    int impute_threshold;
 
     std::vector<std::pair<PID, size_t>> pid_to_cid_;
 
@@ -614,16 +615,23 @@ inline void IVF::gather_dists(
     std::vector<AnnCandidate<float>> centroid_dist(nprobe);
     this->initer_->centroids_distances(rotated_query.data(), nprobe, centroid_dist);
 
-    centroid_dists_[qid] = centroid_dist[nprobe - 1].distance;
+    centroid_dists_[qid] = centroid_dist[0].distance * centroid_dist[0].distance;
 
     SplitBatchQuery<float> q_obj(
         rotated_query.data(), padded_dim_, ex_bits_, metric_type_, use_hacc
     );
 
+    // int cumu_size = 0;
     for (size_t i = 0; i < nprobe; ++i) {
         PID cid = centroid_dist[i].id;
         float dist = centroid_dist[i].distance;
         const Cluster& cur_cluster = cluster_lst_[cid];
+
+        // cumu_size += cur_cluster.num();
+        // if (cumu_size > impute_threshold && centroid_dists_[qid] == 0) {
+        //     centroid_dists_[qid] = dist;
+        // }
+
         ids.resize(ids.size() + cur_cluster.num());
         dists.resize(dists.size() + cur_cluster.num());
         float* cur_dists = dists.data() + (dists.size() - cur_cluster.num());
