@@ -6,7 +6,7 @@
 #include <unordered_set>
 
 std::vector<std::vector<size_t>> read_gt_tsv(int num_queries, int top_k) {
-    const std::string baseline_tsv_name = "../../ColBERT/lotte-groundtruth-top1000--.tsv";
+    const std::string baseline_tsv_name = "lotte-groundtruth-top1000--.tsv";
     std::vector<std::vector<size_t>> ground_truth(num_queries, std::vector<size_t>(top_k, -1));
     std::ifstream file(baseline_tsv_name);
     if (!file.is_open()) {

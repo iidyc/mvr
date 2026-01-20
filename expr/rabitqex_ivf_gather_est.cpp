@@ -18,9 +18,9 @@ int main() {
     ivf.centroid_dists_.resize(num_q * q_doclen);
 
     size_t dist_comps = 0;
-    int nq = 100;
+    int nq = num_q;
     std::vector<std::vector<size_t>> results(nq);
-#pragma omp parallel for reduction(+:dist_comps)
+#pragma omp parallel for schedule(dynamic) reduction(+:dist_comps)
     for (int qid = 0; qid < nq; ++qid) {
         std::vector<float> doc_dists(num_docs * q_doclen, 0.0f);
         std::vector<size_t> to_rerank_docs = gather_docids_with_dists(ivf, num_docs, q_doclen, d, qid * q_doclen, Q.data() + qid * q_doclen * d, nprobe, docid_map, doc_dists);
