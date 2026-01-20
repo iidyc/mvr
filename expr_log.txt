@@ -25,3 +25,58 @@
     Total found documents: 61539
     start reranking 61539 documents.
     Recall@100: 0.87
+
+1/19
+./rabitqex_ivf_gather_est
+-index: 
+    ivf_rabitq_2097152_5bits_l2
+-algorithm:
+    Search nprobe=32 nearest clusters for each query embedding. 
+    Compute the distances of vectors in the clusters. Use the distance to compute partial matrix.
+    Use the partial matrix for ranking, get top-n_stage1=5000 candidates.
+    Use rabitq estimated distance to do final (full matrix) reranking.
+Avg distance computations: 5000
+Recall@100: 0.9281
+
+-index:
+    ivf_rabitq_2097152_5bits_l2_noresidual
+Recall@100: 0.9241
+
+./rabitqex_ivf_est
+-index:
+    ivf_rabitq_2097152_5bits_l2
+-algorithm:
+    Search nprobe=32 nearest clusters for each query embedding. 
+    Don't compute the distances of vectors in the clusters. Gather all doc ids encountered.
+    Use rabitq estimated distance to rank (full matrix) all candidate docs.
+Avg distance computations: 26595
+Recall@100: 0.9663
+
+-index:
+    ivf_rabitq_2097152_5bits_l2_noresidual
+Recall@100: 0.9606
+
+./warp
+-index:
+    ivf_rabitq_2097152_5bits_l2
+-algorithm:
+    Search nprobe=32 nearest clusters for each query embedding. 
+    Compute the distances of vectors in the clusters. Impute the missing distance with centroid score of farthest cluster.
+    Directly use the imputed matrix for ranking.
+Avg distance computations: 26595
+Recall@100: 0.4964
+
+./warp_rerank
+-index:
+    ivf_rabitq_2097152_5bits_l2
+-algorithm:
+    Search nprobe=32 nearest clusters for each query embedding. 
+    Compute the distances of vectors in the clusters. Impute the missing distance with centroid score of farthest cluster.
+    Use the partial matrix for ranking, get top-n_stage1=5000 candidates.
+    Use rabitq estimated distance to rank (full matrix) all candidate docs.
+Avg distance computations: 5000
+Recall@100: 0.9357
+
+Thoughts:
+1. Can optimize efficiency of reranking using rabitq estimated distances?
+2. Can imputed distance be better estimated?
