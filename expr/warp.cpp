@@ -16,17 +16,21 @@ int main() {
 
     ivf.centroid_dists_.resize(num_q * q_doclen);
 
-    size_t dist_comps = 0;
     int nq = 100;
     std::vector<std::vector<size_t>> results(nq);
-#pragma omp parallel for schedule(dynamic) reduction(+:dist_comps)
+    std::vector<Stats> stats(nq);
+#pragma omp parallel for schedule(dynamic)
     for (int qid = 0; qid < nq; ++qid) {
         std::vector<float> doc_dists(num_docs * q_doclen, 0.0f);
-        std::vector<size_t> to_rerank_docs = gather_docids_with_dists(ivf, num_docs, q_doclen, d, qid * q_doclen, Q.data() + qid * q_doclen * d, nprobe, docid_map, doc_dists);
+        std::vector<size_t> to_rerank_docs = gather_docids_with_dists(ivf, num_docs, q_doclen, d, qid * q_doclen, Q.data() + qid * q_doclen * d, nprobe, docid_map, doc_dists, stats[qid]);
+        Timer rerank_timer;
+        rerank_timer.tick();
         rerank_gathered_dists_impute(ivf, qid, doc_dists, num_docs, q_doclen, to_rerank_docs, k, results[qid]);
-        dist_comps += to_rerank_docs.size();
+        rerank_timer.tuck("", false);
+        stats[qid].rerank_time = rerank_timer.diff.count();
     }
-    std::cout << ">>> Avg distance computations: " << dist_comps / nq << std::endl;
     auto ground_truth = read_gt_tsv(num_q, 1000);
     compute_recall(ground_truth, results, k);
+
+    aggregate_stats(stats);
 }

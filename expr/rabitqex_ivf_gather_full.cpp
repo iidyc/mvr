@@ -10,6 +10,7 @@ int main() {
     int num_d, num_q, d, q_doclen, num_docs;
     rabitqlib::ivf::IVF ivf;
     ivf.load("ivf_rabitq_2097152_5bits_l2_noresidual.index");
+    std::vector<float>               emeddings  = load_data(num_d, d);
     std::vector<float>               Q          = load_query(q_doclen, num_q, d);
     std::vector<int>                 doclens    = load_doclens();
     std::vector<size_t>              docid_map  = build_docid_map(doclens, num_docs);
@@ -17,27 +18,16 @@ int main() {
 
     ivf.centroid_dists_.resize(num_q * q_doclen);
 
-    Timer timer;
-    int nq = 1;
+    int nq = 100;
     std::vector<std::vector<size_t>> results(nq);
     std::vector<Stats> stats(nq);
-// #pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic)
     for (int qid = 0; qid < nq; ++qid) {
-        Timer timer;
-        timer.tick();
         std::vector<float> doc_dists(num_docs * q_doclen, 0.0f);
         std::vector<size_t> to_rerank_docs = gather_docids_with_dists(ivf, num_docs, q_doclen, d, qid * q_doclen, Q.data() + qid * q_doclen * d, nprobe, docid_map, doc_dists, stats[qid]);
-        timer.tuck("", false);
-        stats[qid].total_gather_time = timer.diff.count();
-        timer.tick();
         std::vector<size_t> stage1_results;
         rerank_gathered_dists(ivf, doc_dists, num_docs, q_doclen, to_rerank_docs, n_stage1, stage1_results);
-        timer.tuck("", false);
-        stats[qid].rerank_stage1_time = timer.diff.count();
-        timer.tick();
-        rerank_rabitqex_dists(ivf, num_docs, Q.data() + qid * q_doclen * d, q_doclen, d, doc_to_emb, stage1_results, k, results[qid], stats[qid]);
-        timer.tuck("", false);
-        stats[qid].rerank_stage2_time = timer.diff.count();
+        rerank_full_dists(emeddings, num_docs, Q.data() + qid * q_doclen * d, q_doclen, d, doc_to_emb, stage1_results, k, results[qid], stats[qid]);
     }
     auto ground_truth = read_gt_tsv(num_q, 1000);
     compute_recall(ground_truth, results, k);

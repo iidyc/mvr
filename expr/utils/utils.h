@@ -2,9 +2,13 @@
 #include <vector>
 #include <fstream>
 #include <queue>
+#include <chrono>
+
+#include <faiss/utils/distances.h>
 
 #include "../../RaBitQ-Library/include/rabitqlib/defines.hpp"
 #include "../../RaBitQ-Library/include/rabitqlib/index/ivf/ivf.hpp"
+#include "../../RaBitQ-Library/include/rabitqlib/utils/util.h"
 
 std::vector<float> load_data(int& num_embeddings, int& d) {
     std::ifstream emb_file("embeddings.bin", std::ios::binary);
@@ -102,14 +106,17 @@ std::vector<size_t> gather_docids_with_dists(
     float* queries, 
     int nprobe, 
     std::vector<size_t>& docid_map,
-    std::vector<float>& doc_dists_out
+    std::vector<float>& doc_dists_out,
+    Stats& stat
 ) {
     std::vector<bool> doc_found(num_docs, false);
+    Timer timer;
     for (int j = 0; j < q_doclen; ++j) {
         float* qj = queries + j * d;
         std::vector<float> token_dists;
         std::vector<rabitqlib::PID> ids;
-        ivf.gather_dists(qj, nprobe, token_dists, ids, qid + j);
+        ivf.gather_dists(qj, nprobe, token_dists, ids, qid + j, stat);
+        timer.tick();
         for (size_t idx = 0; idx < ids.size(); ++idx) {
             size_t emb_id = ids[idx];
             float dist = (2 - token_dists[idx]) / 2;
@@ -117,6 +124,8 @@ std::vector<size_t> gather_docids_with_dists(
             doc_found[doc_id] = true;
             doc_dists_out[j * num_docs + doc_id] = std::max(doc_dists_out[j * num_docs + doc_id], dist);
         }
+        timer.tuck("", false);
+        stat.gather_matrix_time += timer.diff.count();
     }
     std::vector<size_t> to_rerank_docs;
     for (int doc_id = 0; doc_id < num_docs; ++doc_id) {
@@ -136,7 +145,8 @@ void rerank_rabitqex_dists(
     const std::vector<std::vector<size_t>>& doc_to_emb,
     const std::vector<size_t>& candidates, 
     int k, 
-    std::vector<size_t>& id_out
+    std::vector<size_t>& id_out,
+    Stats& stat
 ) {
     auto dc = ivf.get_distance_computer();
     std::vector<float> doc_scores(num_docs, 0.0f);
@@ -145,6 +155,7 @@ void rerank_rabitqex_dists(
         dc->set_query(qj);
         for (size_t doc_id : candidates) {
             float max_token_score = -1e10;
+            stat.rerank_dist_comps += doc_to_emb[doc_id].size();
             for (size_t emb_id : doc_to_emb[doc_id]) {
                 float dist = (2 - (*dc)(emb_id)) / 2;
                 max_token_score = std::max(max_token_score, dist);
@@ -215,6 +226,47 @@ void rerank_gathered_dists_impute(
             } else {
                 doc_scores[doc_id] += (2 - ivf.centroid_dists_[qid * q_doclen + j]) / 2;
             }
+        }
+    }
+    using DocScorePair = std::pair<float, size_t>;
+    auto cmp = [](const DocScorePair& a, const DocScorePair& b) {
+        return a.first < b.first; // max-heap
+    };
+    std::priority_queue<DocScorePair, std::vector<DocScorePair>, decltype(cmp)> max_heap(cmp);
+    for (size_t doc_id : candidates) {
+        float score = doc_scores[doc_id];
+        max_heap.emplace(score, doc_id);
+    }
+    for (int i = 0; i < k && !max_heap.empty(); ++i) {
+        id_out.push_back(max_heap.top().second);
+        max_heap.pop();
+    }
+}
+
+void rerank_full_dists(
+    std::vector<float>& embeddings,
+    int num_docs, 
+    float* queries, 
+    int q_doclen, 
+    int d, 
+    const std::vector<std::vector<size_t>>& doc_to_emb,
+    const std::vector<size_t>& candidates, 
+    int k, 
+    std::vector<size_t>& id_out,
+    Stats& stat
+) {
+    std::vector<float> doc_scores(num_docs, 0.0f);
+    for (int j = 0; j < q_doclen; ++j) {
+        float* qj = queries + j * d;
+        for (size_t doc_id : candidates) {
+            float max_token_score = -1e10;
+            stat.rerank_dist_comps += doc_to_emb[doc_id].size();
+            for (size_t emb_id : doc_to_emb[doc_id]) {
+                float* emb_vec = embeddings.data() + emb_id * d;
+                float dist = faiss::fvec_inner_product(qj, emb_vec, d);
+                max_token_score = std::max(max_token_score, dist);
+            }
+            doc_scores[doc_id] += max_token_score;
         }
     }
     using DocScorePair = std::pair<float, size_t>;

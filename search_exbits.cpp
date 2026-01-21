@@ -76,6 +76,7 @@ int main() {
     int topk1 = 5000;
     int topk = 100;
     int avg_to_rerank = 0;
+    std::vector<Stats> stats(nq);
 #pragma omp parallel for reduction(+: avg_to_rerank)
     for (int i = 0; i < nq; ++i) {
         auto dc = ivf.get_distance_computer();
@@ -87,7 +88,7 @@ int main() {
             int nprobe = 32;
             std::vector<float> token_dists;
             std::vector<rabitqlib::PID> ids;
-            ivf.gather_dists(qj, nprobe, token_dists, ids, i * q_doclen + j);
+            ivf.gather_dists(qj, nprobe, token_dists, ids, i * q_doclen + j, stats[i]);
             for (size_t idx = 0; idx < ids.size(); ++idx) {
                 size_t emb_id = ids[idx];
                 float dist = (2 - token_dists[idx]) / 2;

@@ -25,6 +25,7 @@
 #include "rabitqlib/utils/memory.hpp"
 #include "rabitqlib/utils/rotator.hpp"
 #include "rabitqlib/utils/space.hpp"
+#include "rabitqlib/utils/util.h"
 
 namespace rabitqlib::ivf {
 class IVF {
@@ -250,7 +251,7 @@ public:
 
     void search(const float*, size_t, size_t, PID*, bool) const;
 
-    void gather_dists(const float*, size_t, std::vector<float>&, std::vector<PID>&, int, bool);
+    void gather_dists(const float*, size_t, std::vector<float>&, std::vector<PID>&, int, Stats&, bool);
 
     void gather_ids(const float*, size_t, std::vector<PID>&, int, bool);
 
@@ -653,6 +654,7 @@ inline void IVF::gather_dists(
     std::vector<float>& dists,
     std::vector<PID>& ids,
     int qid,
+    Stats& stat,
     bool use_hacc = true
 ) {
     nprobe = std::min(nprobe, num_cluster_);  // corner case
@@ -660,9 +662,14 @@ inline void IVF::gather_dists(
     this->rotator_->rotate(query, rotated_query.data());
 
     // use initer to get closest nprobe centroids
+    Timer timer;
+    timer.tick();
     std::vector<AnnCandidate<float>> centroid_dist(nprobe);
     this->initer_->centroids_distances(rotated_query.data(), nprobe, centroid_dist);
+    timer.tuck("", false);
+    stat.gather_hnsw_time += timer.diff.count();
 
+    timer.tick();
     centroid_dists_[qid] = centroid_dist[0].distance * centroid_dist[0].distance;
 
     SplitBatchQuery<float> q_obj(
@@ -684,6 +691,7 @@ inline void IVF::gather_dists(
         float dist = centroid_dist[i].distance;
         const Cluster& cur_cluster = cluster_lst_[cid];
 
+        stat.gather_dist_comps += cur_cluster.num();
         // cumu_size += cur_cluster.num();
         // if (cumu_size > impute_threshold && centroid_dists_[qid] == 0) {
         //     centroid_dists_[qid] = dist;
@@ -735,6 +743,8 @@ inline void IVF::gather_dists(
             cur_dists += remain;
         }
     }
+    timer.tuck("", false);
+    stat.gather_dist_time += timer.diff.count();
 }
 
 
