@@ -43,7 +43,7 @@ int main() {
         faiss::idx_t lo = ivf_index->direct_map.get(i);
         list_nos.push_back(faiss::lo_listno(lo));
     }
-    rabitqlib::ivf::IVF ivf(num_embeddings, d, 2097152, 5, rabitqlib::METRIC_L2);
+    rabitqlib::ivf::IVF ivf(num_embeddings, d, 2097152, 5, rabitqlib::METRIC_L2, rabitqlib::RotatorType::FhtKacRotator, false);
     ivf.construct(embeddings.data(), ((faiss::IndexFlat*)((faiss::IndexHNSW*)ivf_index->quantizer)->storage)->get_xb(), list_nos.data());
-    ivf.save("ivf_rabitq_2097152_5bits_l2.index");
+    ivf.save("ivf_rabitq_2097152_5bits_l2_noresidual.index");
 }

@@ -80,3 +80,6 @@ Recall@100: 0.9357
 Thoughts:
 1. Can optimize efficiency of reranking using rabitq estimated distances?
 2. Can imputed distance be better estimated?
+3. When reranking with rabitq, use CPU to compute 1bit distance, collect those not filtered,
+   send exbits to GPU
+   -two layouts for 1bit: cluster compact and document compact 

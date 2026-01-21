@@ -9,7 +9,7 @@ int main() {
     int k = 100;
     int num_d, num_q, d, q_doclen, num_docs;
     rabitqlib::ivf::IVF ivf;
-    ivf.load("ivf_rabitq_2097152_5bits_l2.index");
+    ivf.load("ivf_rabitq_2097152_5bits_l2_noresidual.index");
     std::vector<float>               Q          = load_query(q_doclen, num_q, d);
     std::vector<int>                 doclens    = load_doclens();
     std::vector<size_t>              docid_map  = build_docid_map(doclens, num_docs);
@@ -18,7 +18,7 @@ int main() {
     ivf.centroid_dists_.resize(num_q * q_doclen);
 
     size_t dist_comps = 0;
-    int nq = num_q;
+    int nq = 100;
     std::vector<std::vector<size_t>> results(nq);
 #pragma omp parallel for schedule(dynamic) reduction(+:dist_comps)
     for (int qid = 0; qid < nq; ++qid) {

@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -44,6 +45,7 @@ public:
     std::vector<Cluster> cluster_lst_;   // List of clusters in ivf
     MetricType metric_type_ = rabitqlib::METRIC_L2;  // metric type
     float (*ip_func_)(const float*, const uint8_t*, size_t) = nullptr;
+    bool by_residual_ = true;
 
     std::vector<float> centroid_dists_;
     int impute_threshold;
@@ -119,7 +121,8 @@ public:
         size_t,
         size_t,
         MetricType metric_type = rabitqlib::METRIC_L2,
-        RotatorType type = RotatorType::FhtKacRotator
+        RotatorType type = RotatorType::FhtKacRotator,
+        bool by_residual = true
     );
 
     ~IVF();
@@ -140,6 +143,15 @@ public:
                 ivf_.ex_bits_,
                 ivf_.metric_type_
             );
+
+            if (!ivf_.by_residual_) {
+                float q_norm_sq = 0;
+                for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
+                    q_norm_sq += rotated_query_[i] * rotated_query_[i];
+                }
+                float q_norm = std::sqrt(q_norm_sq);
+                q_obj_->set_g_add(q_norm, 0.0f);
+            }
         }
 
         float operator()(size_t idx) {
@@ -161,25 +173,27 @@ public:
                 cluster.ex_data() +
                 local_idx * ExDataMap<float>::data_bytes(ivf_.padded_dim_, ivf_.ex_bits_);
 
-            const float* centroid = ivf_.initer_->centroid(cluster_idx);
+            if (ivf_.by_residual_) {
+                const float* centroid = ivf_.initer_->centroid(cluster_idx);
 
-            if (ivf_.metric_type_ == rabitqlib::METRIC_L2) {
-                float dist_sq = 0;
-                for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
-                    float diff = rotated_query_[i] - centroid[i];
-                    dist_sq += diff * diff;
+                if (ivf_.metric_type_ == rabitqlib::METRIC_L2) {
+                    float dist_sq = 0;
+                    for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
+                        float diff = rotated_query_[i] - centroid[i];
+                        dist_sq += diff * diff;
+                    }
+                    float dist = std::sqrt(dist_sq);
+                    q_obj_->set_g_add(dist);
+                } else {
+                    float ip = 0;
+                    float norm_sq = 0;
+                    for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
+                        ip += rotated_query_[i] * centroid[i];
+                        norm_sq += centroid[i] * centroid[i];
+                    }
+                    float norm = std::sqrt(norm_sq);
+                    q_obj_->set_g_add(norm, ip);
                 }
-                float dist = std::sqrt(dist_sq);
-                q_obj_->set_g_add(dist);
-            } else {
-                float ip = 0;
-                float norm_sq = 0;
-                for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
-                    ip += rotated_query_[i] * centroid[i];
-                    norm_sq += centroid[i] * centroid[i];
-                }
-                float norm = std::sqrt(norm_sq);
-                q_obj_->set_g_add(norm, ip);
             }
 
             float est_dist_arr[fastscan::kBatchSize];
@@ -240,6 +254,9 @@ public:
 
     void gather_ids(const float*, size_t, std::vector<PID>&, int, bool);
 
+    void set_by_residual(bool by_residual) { by_residual_ = by_residual; }
+    [[nodiscard]] bool by_residual() const { return by_residual_; }
+
     [[nodiscard]] size_t padded_dim() const { return this->padded_dim_; }
 
     [[nodiscard]] size_t num_clusters() const { return this->num_cluster_; }
@@ -251,7 +268,8 @@ inline IVF::IVF(
     size_t cluster_num,
     size_t bits,
     MetricType metric_type,
-    RotatorType type
+    RotatorType type,
+    bool by_residual
 )
     : num_(n)
     , dim_(dim)
@@ -259,7 +277,8 @@ inline IVF::IVF(
     , num_cluster_(cluster_num)
     , ex_bits_(bits - 1)
     , type_(type)
-    , metric_type_(metric_type) {
+    , metric_type_(metric_type)
+    , by_residual_(by_residual) {
     if (bits < 1 || bits > 9) {
         std::cerr << "Invalid number of bits for quantization in IVF::IVF\n";
         std::cerr << "Expected: 1 to 9  Input:" << bits << '\n';
@@ -411,6 +430,13 @@ inline void IVF::quantize_cluster(
     // rotate centroid
     this->rotator_->rotate(cur_centroid, rotated_centroid);
 
+    std::vector<float> zero_centroid;
+    const float* centroid_for_quant = rotated_centroid;
+    if (!by_residual_) {
+        zero_centroid.assign(padded_dim_, 0.0f);
+        centroid_for_quant = zero_centroid.data();
+    }
+
     // rotate vectors for this cluster
     std::vector<float> rotated_data(padded_dim_ * num_points);
     for (size_t i = 0; i < num_points; ++i) {
@@ -427,7 +453,7 @@ inline void IVF::quantize_cluster(
             // compact bin data
             quant::quantize_compact_one_bit(
                 rotated_data.data() + ((i + j) * padded_dim_),
-                rotated_centroid,
+                centroid_for_quant,
                 padded_dim_,
                 compact_bin_data + ((i + j) * BinDataMap<float>::data_bytes(padded_dim_)),
                 metric_type_
@@ -436,7 +462,7 @@ inline void IVF::quantize_cluster(
 
         quant::quantize_split_batch(
             rotated_data.data() + (i * padded_dim_),
-            rotated_centroid,
+            centroid_for_quant,
             n,
             padded_dim_,
             ex_bits_,
@@ -496,6 +522,9 @@ inline void IVF::save(const char* filename) const {
         reinterpret_cast<const char*>(compact_bin_data_), static_cast<long>(BinDataMap<float>::data_bytes(padded_dim_) * num_)
     );
 
+    uint8_t by_residual_flag = by_residual_ ? 1 : 0;
+    output.write(reinterpret_cast<const char*>(&by_residual_flag), sizeof(uint8_t));
+
     output.close();
 }
 
@@ -548,6 +577,14 @@ inline void IVF::load(const char* filename) {
 
     build_id_map();
 
+    if (input.peek() != EOF) {
+        uint8_t by_residual_flag = 1;
+        input.read(reinterpret_cast<char*>(&by_residual_flag), sizeof(uint8_t));
+        if (input.gcount() == static_cast<std::streamsize>(sizeof(uint8_t))) {
+            by_residual_ = (by_residual_flag != 0);
+        }
+    }
+
     input.close();
     std::cout << "Index loaded\n";
 }
@@ -573,23 +610,34 @@ inline void IVF::search(
         rotated_query.data(), padded_dim_, ex_bits_, metric_type_, use_hacc
     );
 
+    if (!by_residual_) {
+        float q_norm_sq = 0;
+        for (size_t i = 0; i < padded_dim_; ++i) {
+            q_norm_sq += rotated_query[i] * rotated_query[i];
+        }
+        float q_norm = std::sqrt(q_norm_sq);
+        q_obj.set_g_add(q_norm, 0.0f);
+    }
+
     for (size_t i = 0; i < nprobe; ++i) {
         PID cid = centroid_dist[i].id;
         float dist = centroid_dist[i].distance;
         const Cluster& cur_cluster = cluster_lst_[cid];
 
-        if (metric_type_ == METRIC_L2) {
-            q_obj.set_g_add(dist);
-        } else if (metric_type_ == METRIC_IP) {
-            auto g_add_ip = dot_product<float>(
-                rotated_query.data(), initer_->centroid(cid), padded_dim_
-            );
-            q_obj.set_g_add(dist, g_add_ip);
-        } else {
-            // unsupported
-            std::cerr << "Invalid quantize metric type, only support L2 and IP metric\n "
-                      << std::flush;
-            return;
+        if (by_residual_) {
+            if (metric_type_ == METRIC_L2) {
+                q_obj.set_g_add(dist);
+            } else if (metric_type_ == METRIC_IP) {
+                auto g_add_ip = dot_product<float>(
+                    rotated_query.data(), initer_->centroid(cid), padded_dim_
+                );
+                q_obj.set_g_add(dist, g_add_ip);
+            } else {
+                // unsupported
+                std::cerr << "Invalid quantize metric type, only support L2 and IP metric\n "
+                          << std::flush;
+                return;
+            }
         }
         // q_obj.set_g_add(dist);
         search_cluster(cur_cluster, q_obj, knns, use_hacc);
@@ -621,6 +669,15 @@ inline void IVF::gather_dists(
         rotated_query.data(), padded_dim_, ex_bits_, metric_type_, use_hacc
     );
 
+    if (!by_residual_) {
+        float q_norm_sq = 0;
+        for (size_t i = 0; i < padded_dim_; ++i) {
+            q_norm_sq += rotated_query[i] * rotated_query[i];
+        }
+        float q_norm = std::sqrt(q_norm_sq);
+        q_obj.set_g_add(q_norm, 0.0f);
+    }
+
     // int cumu_size = 0;
     for (size_t i = 0; i < nprobe; ++i) {
         PID cid = centroid_dist[i].id;
@@ -638,18 +695,20 @@ inline void IVF::gather_dists(
         PID* cur_ids = ids.data() + (ids.size() - cur_cluster.num());
         std::copy(cur_cluster.ids(), cur_cluster.ids() + cur_cluster.num(), cur_ids);
 
-        if (metric_type_ == METRIC_L2) {
-            q_obj.set_g_add(dist);
-        } else if (metric_type_ == METRIC_IP) {
-            auto g_add_ip = dot_product<float>(
-                rotated_query.data(), initer_->centroid(cid), padded_dim_
-            );
-            q_obj.set_g_add(dist, g_add_ip);
-        } else {
-            // unsupported
-            std::cerr << "Invalid quantize metric type, only support L2 and IP metric\n "
-                      << std::flush;
-            return;
+        if (by_residual_) {
+            if (metric_type_ == METRIC_L2) {
+                q_obj.set_g_add(dist);
+            } else if (metric_type_ == METRIC_IP) {
+                auto g_add_ip = dot_product<float>(
+                    rotated_query.data(), initer_->centroid(cid), padded_dim_
+                );
+                q_obj.set_g_add(dist, g_add_ip);
+            } else {
+                // unsupported
+                std::cerr << "Invalid quantize metric type, only support L2 and IP metric\n "
+                          << std::flush;
+                return;
+            }
         }
         // q_obj.set_g_add(dist);
         size_t iter = cur_cluster.num() / fastscan::kBatchSize;
