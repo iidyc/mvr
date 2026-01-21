@@ -27,7 +27,7 @@ int main() {
         rerank_timer.tick();
         rerank_gathered_dists_impute(ivf, qid, doc_dists, num_docs, q_doclen, to_rerank_docs, k, results[qid]);
         rerank_timer.tuck("", false);
-        stats[qid].rerank_time = rerank_timer.diff.count();
+        // stats[qid].rerank_time = rerank_timer.diff.count();
     }
     auto ground_truth = read_gt_tsv(num_q, 1000);
     compute_recall(ground_truth, results, k);

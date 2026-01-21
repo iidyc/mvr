@@ -3,8 +3,8 @@
 
 int main() {
     // hyper-parameters
-    int nprobe = 32;
-    int n_stage1 = 5000;
+    int nprobe = 1024;
+    int n_stage1 = 50000;
 
     int k = 100;
     int num_d, num_q, d, q_doclen, num_docs;
@@ -17,11 +17,12 @@ int main() {
 
     ivf.centroid_dists_.resize(num_q * q_doclen);
 
-    Timer timer;
-    int nq = 1;
+    Timer total_timer;
+    total_timer.tick();
+    int nq = 100;
     std::vector<std::vector<size_t>> results(nq);
     std::vector<Stats> stats(nq);
-// #pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic)
     for (int qid = 0; qid < nq; ++qid) {
         Timer timer;
         timer.tick();
@@ -39,6 +40,7 @@ int main() {
         timer.tuck("", false);
         stats[qid].rerank_stage2_time = timer.diff.count();
     }
+    total_timer.tuck(">>> Total Time", true);
     auto ground_truth = read_gt_tsv(num_q, 1000);
     compute_recall(ground_truth, results, k);
 

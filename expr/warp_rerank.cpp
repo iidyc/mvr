@@ -3,8 +3,8 @@
 
 int main() {
     // hyper-parameters
-    int nprobe = 32;
-    int n_stage1 = 5000;
+    int nprobe = 128;
+    int n_stage1 = 20000;
 
     int k = 100;
     int num_d, num_q, d, q_doclen, num_docs;

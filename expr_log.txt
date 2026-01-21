@@ -41,6 +41,21 @@ Recall@100: 0.9281
 -index:
     ivf_rabitq_2097152_5bits_l2_noresidual
 Recall@100: 0.9241
+36.0165 s
+>>> Average total gather time: 0.710958 s
+>>> Average rerank stage 2 time: 16.965 s
+>>> Average gather distance computations: 172245
+>>> Average rerank distance computations: 18140023
+
+./rabitqex_ivf_gather_full
+-index:
+    ivf_rabitq_2097152_5bits_l2_noresidual
+Recall@100: 0.9301
+10.3138 s
+>>> Average total gather time: 2.53225 s
+>>> Average rerank stage 2 time: 2.50644 s
+>>> Average gather distance computations: 172245
+>>> Average rerank distance computations: 18140023
 
 ./rabitqex_ivf_est
 -index:
@@ -77,9 +92,19 @@ Recall@100: 0.4964
 Avg distance computations: 5000
 Recall@100: 0.9357
 
+nprobe = 128
+n_rerank = 20000
+Recall@100: 0.9773
+>>> Average gather distance computations: 636048
+>>> Average rerank distance computations: 70688504
+
 Thoughts:
 1. Can optimize efficiency of reranking using rabitq estimated distances?
 2. Can imputed distance be better estimated?
 3. When reranking with rabitq, use CPU to compute 1bit distance, collect those not filtered,
    send exbits to GPU
    -two layouts for 1bit: cluster compact and document compact 
+
+Observation:
+1. dc in reranking is much larger than cg. 
+2. Two keys: increase cg accuracy (less reranking needed); increase reranking efficiency.

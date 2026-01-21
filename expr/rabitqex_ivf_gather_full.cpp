@@ -3,7 +3,7 @@
 
 int main() {
     // hyper-parameters
-    int nprobe = 32;
+    int nprobe = 64;
     int n_stage1 = 5000;
 
     int k = 100;
@@ -18,17 +18,30 @@ int main() {
 
     ivf.centroid_dists_.resize(num_q * q_doclen);
 
+    Timer total_timer;
+    total_timer.tick();
     int nq = 100;
     std::vector<std::vector<size_t>> results(nq);
     std::vector<Stats> stats(nq);
 #pragma omp parallel for schedule(dynamic)
     for (int qid = 0; qid < nq; ++qid) {
+        Timer timer;
+        timer.tick();
         std::vector<float> doc_dists(num_docs * q_doclen, 0.0f);
         std::vector<size_t> to_rerank_docs = gather_docids_with_dists(ivf, num_docs, q_doclen, d, qid * q_doclen, Q.data() + qid * q_doclen * d, nprobe, docid_map, doc_dists, stats[qid]);
+        timer.tuck("", false);
+        stats[qid].total_gather_time = timer.diff.count();
+        timer.tick();
         std::vector<size_t> stage1_results;
         rerank_gathered_dists(ivf, doc_dists, num_docs, q_doclen, to_rerank_docs, n_stage1, stage1_results);
+        timer.tuck("", false);
+        stats[qid].rerank_stage1_time = timer.diff.count();
+        timer.tick();
         rerank_full_dists(emeddings, num_docs, Q.data() + qid * q_doclen * d, q_doclen, d, doc_to_emb, stage1_results, k, results[qid], stats[qid]);
+        timer.tuck("", false);
+        stats[qid].rerank_stage2_time = timer.diff.count();
     }
+    total_timer.tuck(">>> Total Time", true);
     auto ground_truth = read_gt_tsv(num_q, 1000);
     compute_recall(ground_truth, results, k);
 
