@@ -138,10 +138,17 @@ public:
             if (q_obj_) {
                 delete q_obj_;
             }
-            q_obj_ = new SplitBatchQuery<float>(
+            // q_obj_ = new SplitBatchQuery<float>(
+            //     rotated_query_.data(),
+            //     ivf_.padded_dim_,
+            //     ivf_.ex_bits_,
+            //     ivf_.metric_type_
+            // );
+            q_obj_ = new SplitSingleQuery<float>(
                 rotated_query_.data(),
                 ivf_.padded_dim_,
                 ivf_.ex_bits_,
+                quant::RabitqConfig(),
                 ivf_.metric_type_
             );
 
@@ -168,7 +175,10 @@ public:
             size_t batch_idx = local_idx / fastscan::kBatchSize;
             size_t offset_in_batch = local_idx % fastscan::kBatchSize;
 
-            const char* batch_data = cluster.batch_data() + batch_idx * BatchDataMap<float>::data_bytes(ivf_.padded_dim_);
+            // const char* batch_data = cluster.batch_data() + batch_idx * BatchDataMap<float>::data_bytes(ivf_.padded_dim_);
+            const char* compact_bin_data = 
+                cluster.compact_bin_data() + 
+                local_idx * BinDataMap<float>::data_bytes(ivf_.padded_dim_);
 
             const char* ex_data =
                 cluster.ex_data() +
@@ -197,29 +207,45 @@ public:
                 }
             }
 
-            float est_dist_arr[fastscan::kBatchSize];
-            float low_dist_arr[fastscan::kBatchSize];
-            float ip_x0_qr_arr[fastscan::kBatchSize];
+            // float est_dist_arr[fastscan::kBatchSize];
+            // float low_dist_arr[fastscan::kBatchSize];
+            // float ip_x0_qr_arr[fastscan::kBatchSize];
 
-            split_batch_estdist(
-                batch_data,
-                *q_obj_,
-                ivf_.padded_dim_,
-                est_dist_arr,
-                low_dist_arr,
-                ip_x0_qr_arr,
-                true
-            );
+            // split_batch_estdist(
+            //     batch_data,
+            //     *q_obj_,
+            //     ivf_.padded_dim_,
+            //     est_dist_arr,
+            //     low_dist_arr,
+            //     ip_x0_qr_arr,
+            //     true
+            // );
 
-            float ip_x0_qr = ip_x0_qr_arr[offset_in_batch];
+            // float ip_x0_qr = ip_x0_qr_arr[offset_in_batch];
 
-            float ex_dist = split_distance_boosting(
+            // float ex_dist = split_distance_boosting(
+            //     ex_data,
+            //     ivf_.ip_func_,
+            //     *q_obj_,
+            //     ivf_.padded_dim_,
+            //     ivf_.ex_bits_,
+            //     ip_x0_qr
+            // );
+
+            float ex_dist, low_dist, ip_x0_qr;
+
+            split_single_fulldist(
+                compact_bin_data,
                 ex_data,
                 ivf_.ip_func_,
                 *q_obj_,
                 ivf_.padded_dim_,
                 ivf_.ex_bits_,
-                ip_x0_qr
+                ex_dist,
+                low_dist,
+                ip_x0_qr,
+                q_obj_->g_add(),
+                q_obj_->g_error()
             );
 
             return ex_dist;
@@ -232,7 +258,8 @@ public:
        private:
         const IVF& ivf_;
         std::vector<float> rotated_query_;
-        SplitBatchQuery<float>* q_obj_ = nullptr;
+        // SplitBatchQuery<float>* q_obj_ = nullptr;
+        SplitSingleQuery<float>* q_obj_ = nullptr;
         struct IdxPos {
             size_t cluster_idx = 0;
             size_t local_idx = 0;
