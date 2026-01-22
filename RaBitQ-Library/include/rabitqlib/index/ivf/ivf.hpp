@@ -172,10 +172,6 @@ public:
 
             assert(cluster.ids()[local_idx] == idx);
 
-            size_t batch_idx = local_idx / fastscan::kBatchSize;
-            size_t offset_in_batch = local_idx % fastscan::kBatchSize;
-
-            // const char* batch_data = cluster.batch_data() + batch_idx * BatchDataMap<float>::data_bytes(ivf_.padded_dim_);
             const char* compact_bin_data = 
                 cluster.compact_bin_data() + 
                 local_idx * BinDataMap<float>::data_bytes(ivf_.padded_dim_);
@@ -207,31 +203,6 @@ public:
                 }
             }
 
-            // float est_dist_arr[fastscan::kBatchSize];
-            // float low_dist_arr[fastscan::kBatchSize];
-            // float ip_x0_qr_arr[fastscan::kBatchSize];
-
-            // split_batch_estdist(
-            //     batch_data,
-            //     *q_obj_,
-            //     ivf_.padded_dim_,
-            //     est_dist_arr,
-            //     low_dist_arr,
-            //     ip_x0_qr_arr,
-            //     true
-            // );
-
-            // float ip_x0_qr = ip_x0_qr_arr[offset_in_batch];
-
-            // float ex_dist = split_distance_boosting(
-            //     ex_data,
-            //     ivf_.ip_func_,
-            //     *q_obj_,
-            //     ivf_.padded_dim_,
-            //     ivf_.ex_bits_,
-            //     ip_x0_qr
-            // );
-
             float ex_dist, low_dist, ip_x0_qr;
 
             split_single_fulldist(
@@ -249,6 +220,59 @@ public:
             );
 
             return ex_dist;
+        }
+
+        float dist_1bit(size_t idx) {
+            assert(idx < ivf_.pid_to_cid_.size());
+            auto pos = ivf_.pid_to_cid_[idx];
+            size_t cluster_idx = pos.first;
+            size_t local_idx = pos.second;
+
+            const auto& cluster = ivf_.cluster_lst_[cluster_idx];
+
+            assert(cluster.ids()[local_idx] == idx);
+
+            const char* compact_bin_data = 
+                cluster.compact_bin_data() + 
+                local_idx * BinDataMap<float>::data_bytes(ivf_.padded_dim_);
+
+            if (ivf_.by_residual_) {
+                const float* centroid = ivf_.initer_->centroid(cluster_idx);
+
+                if (ivf_.metric_type_ == rabitqlib::METRIC_L2) {
+                    float dist_sq = 0;
+                    for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
+                        float diff = rotated_query_[i] - centroid[i];
+                        dist_sq += diff * diff;
+                    }
+                    float dist = std::sqrt(dist_sq);
+                    q_obj_->set_g_add(dist);
+                } else {
+                    float ip = 0;
+                    float norm_sq = 0;
+                    for (size_t i = 0; i < ivf_.padded_dim_; ++i) {
+                        ip += rotated_query_[i] * centroid[i];
+                        norm_sq += centroid[i] * centroid[i];
+                    }
+                    float norm = std::sqrt(norm_sq);
+                    q_obj_->set_g_add(norm, ip);
+                }
+            }
+
+            float est_dist, low_dist, ip_x0_qr;
+
+            split_single_estdist(
+                compact_bin_data,
+                *q_obj_,
+                ivf_.padded_dim_,
+                ip_x0_qr,
+                est_dist,
+                low_dist,
+                q_obj_->g_add(),
+                q_obj_->g_error()
+            );
+
+            return est_dist;
         }
 
         ~DistanceComputer() {
@@ -694,7 +718,7 @@ inline void IVF::gather_dists(
     std::vector<AnnCandidate<float>> centroid_dist(nprobe);
     this->initer_->centroids_distances(rotated_query.data(), nprobe, centroid_dist);
     timer.tuck("", false);
-    stat.gather_hnsw_time += timer.diff.count();
+    stat.add_stat("gather_hnsw_time", timer.diff.count());
 
     timer.tick();
     centroid_dists_[qid] = centroid_dist[0].distance * centroid_dist[0].distance;
@@ -718,7 +742,7 @@ inline void IVF::gather_dists(
         float dist = centroid_dist[i].distance;
         const Cluster& cur_cluster = cluster_lst_[cid];
 
-        stat.gather_dist_comps += cur_cluster.num();
+        stat.add_stat("gather_dist_comps", cur_cluster.num());
         // cumu_size += cur_cluster.num();
         // if (cumu_size > impute_threshold && centroid_dists_[qid] == 0) {
         //     centroid_dists_[qid] = dist;
@@ -771,7 +795,7 @@ inline void IVF::gather_dists(
         }
     }
     timer.tuck("", false);
-    stat.gather_dist_time += timer.diff.count();
+    stat.add_stat("gather_dist_time", timer.diff.count());
 }
 
 

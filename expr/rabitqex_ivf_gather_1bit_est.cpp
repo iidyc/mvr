@@ -5,6 +5,7 @@ int main() {
     // hyper-parameters
     int nprobe = 1024;
     int n_stage1 = 50000;
+    int n_stage2 = 1000;
 
     int k = 100;
     int num_d, num_q, d, q_doclen, num_docs;
@@ -36,9 +37,14 @@ int main() {
         timer.tuck("", false);
         stats[qid].add_stat("rerank_stage1_time", timer.diff.count());
         timer.tick();
-        rerank_rabitqex_dists(ivf, num_docs, Q.data() + qid * q_doclen * d, q_doclen, d, doc_to_emb, stage1_results, k, results[qid], stats[qid]);
+        std::vector<size_t> stage2_results;
+        rerank_1bit(ivf, num_docs, Q.data() + qid * q_doclen * d, q_doclen, d, doc_to_emb, stage1_results, n_stage2, stage2_results, stats[qid]);
         timer.tuck("", false);
-        stats[qid].add_stat("rerank_stage2_time", timer.diff.count());
+        stats[qid].add_stat("rerank_stage2_1bit_time", timer.diff.count());
+        timer.tick();
+        rerank_rabitqex_dists(ivf, num_docs, Q.data() + qid * q_doclen * d, q_doclen, d, doc_to_emb, stage2_results, k, results[qid], stats[qid]);
+        timer.tuck("", false);
+        stats[qid].add_stat("rerank_stage2_est_time", timer.diff.count());
     }
     total_timer.tuck(">>> Total Time", true);
     auto ground_truth = read_gt_tsv(num_q, 1000);

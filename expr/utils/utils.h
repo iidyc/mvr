@@ -111,6 +111,7 @@ std::vector<size_t> gather_docids_with_dists(
 ) {
     std::vector<bool> doc_found(num_docs, false);
     Timer timer;
+    double gather_matrix_time = 0.0;
     for (int j = 0; j < q_doclen; ++j) {
         float* qj = queries + j * d;
         std::vector<float> token_dists;
@@ -125,8 +126,9 @@ std::vector<size_t> gather_docids_with_dists(
             doc_dists_out[j * num_docs + doc_id] = std::max(doc_dists_out[j * num_docs + doc_id], dist);
         }
         timer.tuck("", false);
-        stat.gather_matrix_time += timer.diff.count();
+        gather_matrix_time += timer.diff.count();
     }
+    stat.add_stat("gather_matrix_time", gather_matrix_time);
     std::vector<size_t> to_rerank_docs;
     for (int doc_id = 0; doc_id < num_docs; ++doc_id) {
         if (doc_found[doc_id]) {
@@ -150,14 +152,57 @@ void rerank_rabitqex_dists(
 ) {
     auto dc = ivf.get_distance_computer();
     std::vector<float> doc_scores(num_docs, 0.0f);
+    size_t rerank_dist_comps = 0;
     for (int j = 0; j < q_doclen; ++j) {
         float* qj = queries + j * d;
         dc->set_query(qj);
         for (size_t doc_id : candidates) {
             float max_token_score = -1e10;
-            stat.rerank_dist_comps += doc_to_emb[doc_id].size();
+            rerank_dist_comps += doc_to_emb[doc_id].size();
             for (size_t emb_id : doc_to_emb[doc_id]) {
                 float dist = (2 - (*dc)(emb_id)) / 2;
+                max_token_score = std::max(max_token_score, dist);
+            }
+            doc_scores[doc_id] += max_token_score;
+        }
+    }
+    stat.add_stat("rerank_dist_comps", static_cast<double>(rerank_dist_comps));
+    using DocScorePair = std::pair<float, size_t>;
+    auto cmp = [](const DocScorePair& a, const DocScorePair& b) {
+        return a.first < b.first; // max-heap
+    };
+    std::priority_queue<DocScorePair, std::vector<DocScorePair>, decltype(cmp)> max_heap(cmp);
+    for (size_t doc_id : candidates) {
+        float score = doc_scores[doc_id];
+        max_heap.emplace(score, doc_id);
+    }
+    for (int i = 0; i < k && !max_heap.empty(); ++i) {
+        id_out.push_back(max_heap.top().second);
+        max_heap.pop();
+    }
+}
+
+void rerank_1bit(
+    rabitqlib::ivf::IVF& ivf,
+    int num_docs, 
+    float* queries, 
+    int q_doclen, 
+    int d, 
+    const std::vector<std::vector<size_t>>& doc_to_emb,
+    const std::vector<size_t>& candidates, 
+    int k, 
+    std::vector<size_t>& id_out,
+    Stats& stat
+) {
+    auto dc = ivf.get_distance_computer();
+    std::vector<float> doc_scores(num_docs, 0.0f);
+    for (int j = 0; j < q_doclen; ++j) {
+        float* qj = queries + j * d;
+        dc->set_query(qj);
+        for (size_t doc_id : candidates) {
+            float max_token_score = -1e10;
+            for (size_t emb_id : doc_to_emb[doc_id]) {
+                float dist = (2 - dc->dist_1bit(emb_id)) / 2;
                 max_token_score = std::max(max_token_score, dist);
             }
             doc_scores[doc_id] += max_token_score;
@@ -188,11 +233,18 @@ void rerank_gathered_dists(
     std::vector<size_t>& id_out
 ) {
     std::vector<float> doc_scores(num_docs, 0.0f);
+    size_t total_scores = 0, valid_scores = 0;
     for (int j = 0; j < q_doclen; ++j) {
         for (size_t doc_id : candidates) {
-            doc_scores[doc_id] += doc_dists[j * num_docs + doc_id];
+            float dist = doc_dists[j * num_docs + doc_id];
+            if (dist != 0) {
+                doc_scores[doc_id] += dist;
+                valid_scores++;
+            }
+            total_scores++;
         }
     }
+    // std::cout << ">>> Rerank gathered dists: total scores = " << total_scores << ", valid scores = " << valid_scores << std::endl;
     using DocScorePair = std::pair<float, size_t>;
     auto cmp = [](const DocScorePair& a, const DocScorePair& b) {
         return a.first < b.first; // max-heap
@@ -256,11 +308,12 @@ void rerank_full_dists(
     Stats& stat
 ) {
     std::vector<float> doc_scores(num_docs, 0.0f);
+    size_t rerank_dist_comps = 0;
     for (int j = 0; j < q_doclen; ++j) {
         float* qj = queries + j * d;
         for (size_t doc_id : candidates) {
             float max_token_score = -1e10;
-            stat.rerank_dist_comps += doc_to_emb[doc_id].size();
+            rerank_dist_comps += doc_to_emb[doc_id].size();
             for (size_t emb_id : doc_to_emb[doc_id]) {
                 float* emb_vec = embeddings.data() + emb_id * d;
                 float dist = faiss::fvec_inner_product(qj, emb_vec, d);
@@ -269,6 +322,7 @@ void rerank_full_dists(
             doc_scores[doc_id] += max_token_score;
         }
     }
+    stat.add_stat("rerank_dist_comps", static_cast<double>(rerank_dist_comps));
     using DocScorePair = std::pair<float, size_t>;
     auto cmp = [](const DocScorePair& a, const DocScorePair& b) {
         return a.first < b.first; // max-heap
